@@ -9,12 +9,11 @@
 #include <errno.h>            // error number library
 #include <fcntl.h>            // for O_* constants
 #include <sys/mman.h>         // mmap library
-#include <sys/types.h>        // various type definitions
 #include <sys/stat.h>         // more constants
+#include <sys/time.h>
 
 // global constants
 #define PORT 2001             // port to connect on
-#define LISTENQ 10            // number of connections
 
 int list_s;                   // listening socket
 
@@ -293,6 +292,11 @@ int main(int argc, char *argv[]) {
     int conn_s;                  //  connection socket
     short int port = PORT;       //  port number
     struct sockaddr_in servaddr; //  socket address structure
+    int childrenToSpawn = 10;    // default to 10
+    if (argc >= 2) {
+      childrenToSpawn = atoi(argv[1]);
+    }
+    
     
     // set up signal handler for ctrl-c
     (void) signal(SIGINT, cleanup);
@@ -333,16 +337,15 @@ int main(int argc, char *argv[]) {
     int children = 0;
     // Variable to store the ID of the process we get when we spawn
     pid_t pid;
-    
+
+    printf("server starting on port %d\n", port);
     // Loop infinitly serving requests
     while(1)
     {
     
-        // If we haven't already spawned 10 children fork
-        if( children <= 10)
-        {
-            pid = fork();
-            children++;
+        if (children < childrenToSpawn) {
+          pid = fork();
+          children++;
         }
         
         // If the pid is -1 the fork failed so handle that
@@ -355,11 +358,14 @@ int main(int argc, char *argv[]) {
         // Have the child process deal with the connection
         if ( pid == 0)
         {	
+            printf("process starting\n");
             // Have the child loop infinetly dealing with a connection then getting the next one in the queue
             while(1)
             {
                 // Accept a connection
                 conn_s = accept(list_s, (struct sockaddr *)&servaddr, &addr_size);
+                struct timeval start;
+                gettimeofday(&start,NULL);
                     
                 // If something went wrong with accepting the connection deal with it
                 if(conn_s == -1)
@@ -383,8 +389,10 @@ int main(int argc, char *argv[]) {
                 // Print out the file they wanted
                 pagesize = printFile(conn_s, details.filename);
                 
+                struct timeval endtime;
+                gettimeofday(&endtime,NULL);
                 // Print out which process handled the request and how much data was sent
-                printf("Process %d served a request of %d bytes.\n", getpid(), headersize+pagesize);	
+                printf("Process %d served a request of %d bytes in %d usec\n", getpid(), headersize+pagesize, endtime.tv_usec - start.tv_usec);	
                 
                 // Close the connection now were done
                 close(conn_s);
