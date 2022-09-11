@@ -403,7 +403,6 @@ int main(int argc, char *argv[]) {
                   contentType = "application/json";
                 }
                 headersize = printHeader(conn_s, details.returncode, contentType);
-                free(contentType);
                 
                 if (details.filename != NULL) {
                   // Print out the file they wanted
