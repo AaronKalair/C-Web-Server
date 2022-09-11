@@ -11,6 +11,7 @@
 #include <sys/mman.h>         // mmap library
 #include <sys/stat.h>         // more constants
 #include <sys/time.h>
+#include "routes.c"
 
 // global constants
 #define PORT 2001             // port to connect on
@@ -21,12 +22,16 @@ int list_s;                   // listening socket
 typedef struct {
 	int returncode;
 	char *filename;
+	char *content;
 } httpRequest;
 
 // headers to send to clients
-char *header200 = "HTTP/1.0 200 OK\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
-char *header400 = "HTTP/1.0 400 Bad Request\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
-char *header404 = "HTTP/1.0 404 Not Found\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
+char *header200 = "HTTP/1.0 200 OK\nServer: C-Serv v0.2\nContent-Type: %s\n\n";
+char *header400 = "HTTP/1.0 400 Bad Request\nServer: C-Serv v0.2\nContent-Type: %s\n\n";
+char *header404 = "HTTP/1.0 404 Not Found\nServer: C-Serv v0.2\nContent-Type: %s\n\n";
+
+// public directory
+char* publicDir = "public_html";
 
 // get a message from the socket until a blank line is recieved
 char *getMessage(int fd) {
@@ -102,46 +107,46 @@ int sendMessage(int fd, char *msg) {
 }
 
 // Extracts the filename needed from a GET request and adds public_html to the front of it
-char * getFileName(char* msg)
+char * getRequestPath(char* msg)
 {
     // Variable to store the filename in
     char * file;
     // Allocate some memory for the filename and check it went OK
     if( (file = malloc(sizeof(char) * strlen(msg))) == NULL)
     {
-        fprintf(stderr, "Error allocating memory to file in getFileName()\n");
+        fprintf(stderr, "Error allocating memory to file in getRequestPath()\n");
         exit(EXIT_FAILURE);
     }
     
     // Get the filename from the header
     sscanf(msg, "GET %s HTTP/1.1", file);
-    
+
+    return file;
+}
+
+char * publicFilePath(char* file) {
     // Allocate some memory not in read only space to store "public_html"
     char *base;
     if( (base = malloc(sizeof(char) * (strlen(file) + 18))) == NULL)
     {
-        fprintf(stderr, "Error allocating memory to base in getFileName()\n");
+        fprintf(stderr, "Error allocating memory to base in publicFilePath()\n");
         exit(EXIT_FAILURE);
     }
     
-    char* ph = "public_html";
-    
     // Copy public_html to the non read only memory
-    strcpy(base, ph);
+    strcpy(base, publicDir);
     
     // Append the filename after public_html
     strcat(base, file);
-    
-    // Free file as we now have the file name in base
-    free(file);
-    
-    // Return public_html/filetheywant.html
+
     return base;
 }
 
 // parse a HTTP request and return an object with return code and filename
 httpRequest parseRequest(char *msg){
     httpRequest ret;
+    ret.filename = NULL;
+    ret.content = NULL;
        
     // A variable to store the name of the file they want
     char* filename;
@@ -152,28 +157,23 @@ httpRequest parseRequest(char *msg){
         exit(EXIT_FAILURE);
     }
     // Find out what page they want
-    filename = getFileName(msg);
+    filename = getRequestPath(msg);
+    printf("request for %s ",filename);
+    
+    // Check if the public page they want exists
+    FILE *exists = fopen(publicFilePath(filename), "r" );
     
     // Check if its a directory traversal attack
-    char *badstring = "..";
-    char *test = strstr(filename, badstring);
-    
-    // Check if they asked for / and give them index.html
-    int test2 = strcmp(filename, "public_html/");
-    
-    // Check if the page they want exists 
-    FILE *exists = fopen(filename, "r" );
-    
-    // If the badstring is found in the filename
-    if( test != NULL )
+    if( strstr(filename, "..") != NULL )
     {
+        printf("go away hacker\n");
         // Return a 400 header and 400.html
         ret.returncode = 400;
         ret.filename = "400.html";
     }
     
     // If they asked for / return index.html
-    else if(test2 == 0)
+    else if(strcmp(filename, "/") == 0)
     {
         ret.returncode = 200;
         ret.filename = "public_html/index.html";
@@ -182,18 +182,24 @@ httpRequest parseRequest(char *msg){
     // If they asked for a specific page and it exists because we opened it sucessfully return it 
     else if( exists != NULL )
     {
-        
         ret.returncode = 200;
-        ret.filename = filename;
+        ret.filename = publicFilePath(filename);
         // Close the file stream
         fclose(exists);
     }
-    
+
     // If we get here the file they want doesn't exist so return a 404
-    else
-    {
-        ret.returncode = 404;
-        ret.filename = "404.html";
+    else {
+      for (int i = 0; i < routeCount; i++) {
+        if (strcmp(routes[i]->routename, filename) == 0) {
+          // TODO do the custom route action
+          ret.returncode = 200;
+          ret.content = (routes[i]->routeFnPtr)(10);
+          return ret;
+        }
+      }
+      ret.returncode = 404;
+      ret.filename = "404.html";
     }
     
     // Return the structure containing the details
@@ -265,27 +271,32 @@ void cleanup(int sig) {
     exit(EXIT_SUCCESS);
 }
 
-int printHeader(int fd, int returncode)
+int printHeader(int fd, int returncode, char* contentType)
 {
+    char* header;
     // Print the header based on the return code
     switch (returncode)
     {
         case 200:
-        sendMessage(fd, header200);
-        return strlen(header200);
+          header = header200;
         break;
         
         case 400:
-        sendMessage(fd, header400);
-        return strlen(header400);
+          header = header400;
         break;
         
         case 404:
-        sendMessage(fd, header404);
-        return strlen(header404);
+          header = header404;
         break;
     }
-    return -1;
+    if (header != NULL) {
+      char interpolatedHeader[ strlen(header) + strlen(contentType) ];
+      sprintf( interpolatedHeader, header, contentType );
+      sendMessage(fd, interpolatedHeader);
+      return strlen(interpolatedHeader);
+    } else {
+      return -1;
+    }
 }
 
 
@@ -385,15 +396,28 @@ int main(int argc, char *argv[]) {
                 free(header);
                 
                 // Print out the correct header
-                headersize = printHeader(conn_s, details.returncode);
+                char * contentType;
+                if (details.filename != NULL) {
+                  contentType = "text/html";
+                } else {
+                  contentType = "application/json";
+                }
+                headersize = printHeader(conn_s, details.returncode, contentType);
+                free(contentType);
                 
-                // Print out the file they wanted
-                pagesize = printFile(conn_s, details.filename);
+                if (details.filename != NULL) {
+                  // Print out the file they wanted
+                  pagesize = printFile(conn_s, details.filename);
+                } else {
+                  pagesize = strlen(details.content);
+                  sendMessage(conn_s, details.content);
+                  sendMessage(conn_s, "\n");
+                }
                 
                 struct timeval endtime;
                 gettimeofday(&endtime,NULL);
                 // Print out which process handled the request and how much data was sent
-                printf("Process %d served a request of %d bytes in %d usec\n", getpid(), headersize+pagesize, endtime.tv_usec - start.tv_usec);	
+                printf("served by process %d for %d bytes in %d usec\n", getpid(), headersize+pagesize, endtime.tv_usec - start.tv_usec);
                 
                 // Close the connection now were done
                 close(conn_s);

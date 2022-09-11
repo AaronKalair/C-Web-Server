@@ -4,4 +4,4 @@ server
 # Ignore any text editor backups
 *~
 
-
+*.swp
