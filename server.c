@@ -24,12 +24,6 @@ typedef struct {
 	char *filename;
 } httpRequest;
 
-// Structure to hold variables that will be placed in shared memory
-typedef struct {
-	pthread_mutex_t mutexlock;
-	int totalbytes;
-} sharedVariables;
-
 // headers to send to clients
 char *header200 = "HTTP/1.0 200 OK\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
 char *header400 = "HTTP/1.0 400 Bad Request\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
@@ -237,7 +231,6 @@ int printFile(int fd, char *filename) {
         exit(EXIT_FAILURE);
     }
     
-    
     // Int to keep track of what getline returns
     int end;
     
@@ -269,9 +262,6 @@ void cleanup(int sig) {
         exit(EXIT_FAILURE);
     }
     
-    // Close the shared memory we used
-    shm_unlink("/sharedmem");
-    
     // exit with success
     exit(EXIT_SUCCESS);
 }
@@ -296,20 +286,6 @@ int printHeader(int fd, int returncode)
         return strlen(header404);
         break;
     }
-}
-
-
-// Increment the global count of data sent out 
-int recordTotalBytes(int bytes_sent, sharedVariables *mempointer)
-{
-    // Lock the mutex
-    pthread_mutex_lock(&(*mempointer).mutexlock);
-    // Increment bytes_sent
-    (*mempointer).totalbytes += bytes_sent;
-    // Unlock the mutex
-    pthread_mutex_unlock(&(*mempointer).mutexlock);
-    // Return the new byte count
-    return (*mempointer).totalbytes;
 }
 
 
@@ -347,47 +323,12 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     } 
     
-    // Set up some shared memory to store our shared variables in
-    
-    // Close the shared memory we use just to be safe
-    shm_unlink("/sharedmem");
-    
-    int sharedmem;
-    
-    // Open the memory
-    if( (sharedmem = shm_open("/sharedmem", O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)) == -1)
-    {
-        fprintf(stderr, "Error opening sharedmem in main() errno is: %s ", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-    
-    // Set the size of the shared memory to the size of my structure
-    ftruncate(sharedmem, sizeof(sharedVariables) );
-    
-    // Map the shared memory into our address space
-    sharedVariables *mempointer;
-    
-    // Set mempointer to point at the shared memory
-    mempointer = mmap(NULL, sizeof(sharedVariables), PROT_READ | PROT_WRITE, MAP_SHARED, sharedmem, 0); 
-    
-    // Check the memory allocation went OK
-    if( mempointer == MAP_FAILED )
-    {
-        fprintf(stderr, "Error setting shared memory for sharedVariables in recordTotalBytes() error is %d \n ", errno);
-        exit(EXIT_FAILURE);
-    }
-    // Initalise the mutex
-    pthread_mutex_init(&(*mempointer).mutexlock, NULL);
-    // Set total bytes sent to 0
-    (*mempointer).totalbytes = 0;
-
     // Size of the address
     int addr_size = sizeof(servaddr);
     
     // Sizes of data were sending out
     int headersize;
     int pagesize;
-    int totaldata;
     // Number of child processes we have spawned
     int children = 0;
     // Variable to store the ID of the process we get when we spawn
@@ -442,11 +383,8 @@ int main(int argc, char *argv[]) {
                 // Print out the file they wanted
                 pagesize = printFile(conn_s, details.filename);
                 
-                // Increment our count of total datasent by all processes and get back the new total
-                totaldata = recordTotalBytes(headersize+pagesize, mempointer);
-                
                 // Print out which process handled the request and how much data was sent
-                printf("Process %d served a request of %d bytes. Total bytes sent %d  \n", getpid(), headersize+pagesize, totaldata);	
+                printf("Process %d served a request of %d bytes.\n", getpid(), headersize+pagesize);	
                 
                 // Close the connection now were done
                 close(conn_s);
