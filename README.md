@@ -13,7 +13,7 @@ On a Linux system system simply use the makefile to compile the server.
 
 On a Mac use this command to compile the server:
 
-gcc cs241server.c –o cs241server
+`gcc server.c -o server`
 
 
 To run the server type ./server into a terminal that is in the directory where the executable file is located.
