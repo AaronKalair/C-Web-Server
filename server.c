@@ -285,6 +285,7 @@ int printHeader(int fd, int returncode)
         return strlen(header404);
         break;
     }
+    return -1;
 }
 
 
@@ -328,7 +329,7 @@ int main(int argc, char *argv[]) {
     } 
     
     // Size of the address
-    int addr_size = sizeof(servaddr);
+    unsigned int addr_size = sizeof(servaddr);
     
     // Sizes of data were sending out
     int headersize;
