@@ -16,7 +16,9 @@ On a Mac use this command to compile the server:
 `gcc server.c -o server`
 
 
-To run the server type ./server into a terminal that is in the directory where the executable file is located.
+To run the server type `./server` into a terminal that is in the directory where the executable file is located.
+
+You can also pass a number after ./server to indicate how many threads the server should use like: `./server 3` for 3 child-processes
 
 By default the server runs on port 2001, so to try it out navigate to
 
