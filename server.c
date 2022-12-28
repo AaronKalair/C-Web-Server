@@ -9,12 +9,12 @@
 #include <errno.h>            // error number library
 #include <fcntl.h>            // for O_* constants
 #include <sys/mman.h>         // mmap library
-#include <sys/types.h>        // various type definitions
 #include <sys/stat.h>         // more constants
+#include <sys/time.h>
+#include "routes.c"
 
 // global constants
 #define PORT 2001             // port to connect on
-#define LISTENQ 10            // number of connections
 
 int list_s;                   // listening socket
 
@@ -22,18 +22,16 @@ int list_s;                   // listening socket
 typedef struct {
 	int returncode;
 	char *filename;
+	char *content;
 } httpRequest;
 
-// Structure to hold variables that will be placed in shared memory
-typedef struct {
-	pthread_mutex_t mutexlock;
-	int totalbytes;
-} sharedVariables;
-
 // headers to send to clients
-char *header200 = "HTTP/1.0 200 OK\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
-char *header400 = "HTTP/1.0 400 Bad Request\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
-char *header404 = "HTTP/1.0 404 Not Found\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
+char *header200 = "HTTP/1.0 200 OK\nServer: C-Serv v0.2\nContent-Type: %s\n\n";
+char *header400 = "HTTP/1.0 400 Bad Request\nServer: C-Serv v0.2\nContent-Type: %s\n\n";
+char *header404 = "HTTP/1.0 404 Not Found\nServer: C-Serv v0.2\nContent-Type: %s\n\n";
+
+// public directory
+char* publicDir = "public_html";
 
 // get a message from the socket until a blank line is recieved
 char *getMessage(int fd) {
@@ -109,46 +107,46 @@ int sendMessage(int fd, char *msg) {
 }
 
 // Extracts the filename needed from a GET request and adds public_html to the front of it
-char * getFileName(char* msg)
+char * getRequestPath(char* msg)
 {
     // Variable to store the filename in
     char * file;
     // Allocate some memory for the filename and check it went OK
     if( (file = malloc(sizeof(char) * strlen(msg))) == NULL)
     {
-        fprintf(stderr, "Error allocating memory to file in getFileName()\n");
+        fprintf(stderr, "Error allocating memory to file in getRequestPath()\n");
         exit(EXIT_FAILURE);
     }
     
     // Get the filename from the header
     sscanf(msg, "GET %s HTTP/1.1", file);
-    
+
+    return file;
+}
+
+char * publicFilePath(char* file) {
     // Allocate some memory not in read only space to store "public_html"
     char *base;
     if( (base = malloc(sizeof(char) * (strlen(file) + 18))) == NULL)
     {
-        fprintf(stderr, "Error allocating memory to base in getFileName()\n");
+        fprintf(stderr, "Error allocating memory to base in publicFilePath()\n");
         exit(EXIT_FAILURE);
     }
     
-    char* ph = "public_html";
-    
     // Copy public_html to the non read only memory
-    strcpy(base, ph);
+    strcpy(base, publicDir);
     
     // Append the filename after public_html
     strcat(base, file);
-    
-    // Free file as we now have the file name in base
-    free(file);
-    
-    // Return public_html/filetheywant.html
+
     return base;
 }
 
 // parse a HTTP request and return an object with return code and filename
 httpRequest parseRequest(char *msg){
     httpRequest ret;
+    ret.filename = NULL;
+    ret.content = NULL;
        
     // A variable to store the name of the file they want
     char* filename;
@@ -159,28 +157,23 @@ httpRequest parseRequest(char *msg){
         exit(EXIT_FAILURE);
     }
     // Find out what page they want
-    filename = getFileName(msg);
+    filename = getRequestPath(msg);
+    printf("request for %s ",filename);
+    
+    // Check if the public page they want exists
+    FILE *exists = fopen(publicFilePath(filename), "r" );
     
     // Check if its a directory traversal attack
-    char *badstring = "..";
-    char *test = strstr(filename, badstring);
-    
-    // Check if they asked for / and give them index.html
-    int test2 = strcmp(filename, "public_html/");
-    
-    // Check if the page they want exists 
-    FILE *exists = fopen(filename, "r" );
-    
-    // If the badstring is found in the filename
-    if( test != NULL )
+    if( strstr(filename, "..") != NULL )
     {
+        printf("go away hacker\n");
         // Return a 400 header and 400.html
         ret.returncode = 400;
         ret.filename = "400.html";
     }
     
     // If they asked for / return index.html
-    else if(test2 == 0)
+    else if(strcmp(filename, "/") == 0)
     {
         ret.returncode = 200;
         ret.filename = "public_html/index.html";
@@ -189,18 +182,24 @@ httpRequest parseRequest(char *msg){
     // If they asked for a specific page and it exists because we opened it sucessfully return it 
     else if( exists != NULL )
     {
-        
         ret.returncode = 200;
-        ret.filename = filename;
+        ret.filename = publicFilePath(filename);
         // Close the file stream
         fclose(exists);
     }
-    
+
     // If we get here the file they want doesn't exist so return a 404
-    else
-    {
-        ret.returncode = 404;
-        ret.filename = "404.html";
+    else {
+      for (int i = 0; i < routeCount; i++) {
+        if (strcmp(routes[i]->routename, filename) == 0) {
+          // TODO do the custom route action
+          ret.returncode = 200;
+          ret.content = (routes[i]->routeFnPtr)(10);
+          return ret;
+        }
+      }
+      ret.returncode = 404;
+      ret.filename = "404.html";
     }
     
     // Return the structure containing the details
@@ -237,7 +236,6 @@ int printFile(int fd, char *filename) {
         exit(EXIT_FAILURE);
     }
     
-    
     // Int to keep track of what getline returns
     int end;
     
@@ -269,47 +267,36 @@ void cleanup(int sig) {
         exit(EXIT_FAILURE);
     }
     
-    // Close the shared memory we used
-    shm_unlink("/sharedmem");
-    
     // exit with success
     exit(EXIT_SUCCESS);
 }
 
-int printHeader(int fd, int returncode)
+int printHeader(int fd, int returncode, char* contentType)
 {
+    char* header;
     // Print the header based on the return code
     switch (returncode)
     {
         case 200:
-        sendMessage(fd, header200);
-        return strlen(header200);
+          header = header200;
         break;
         
         case 400:
-        sendMessage(fd, header400);
-        return strlen(header400);
+          header = header400;
         break;
         
         case 404:
-        sendMessage(fd, header404);
-        return strlen(header404);
+          header = header404;
         break;
     }
-}
-
-
-// Increment the global count of data sent out 
-int recordTotalBytes(int bytes_sent, sharedVariables *mempointer)
-{
-    // Lock the mutex
-    pthread_mutex_lock(&(*mempointer).mutexlock);
-    // Increment bytes_sent
-    (*mempointer).totalbytes += bytes_sent;
-    // Unlock the mutex
-    pthread_mutex_unlock(&(*mempointer).mutexlock);
-    // Return the new byte count
-    return (*mempointer).totalbytes;
+    if (header != NULL) {
+      char interpolatedHeader[ strlen(header) + strlen(contentType) ];
+      sprintf( interpolatedHeader, header, contentType );
+      sendMessage(fd, interpolatedHeader);
+      return strlen(interpolatedHeader);
+    } else {
+      return -1;
+    }
 }
 
 
@@ -317,6 +304,11 @@ int main(int argc, char *argv[]) {
     int conn_s;                  //  connection socket
     short int port = PORT;       //  port number
     struct sockaddr_in servaddr; //  socket address structure
+    int childrenToSpawn = 10;    // default to 10
+    if (argc >= 2) {
+      childrenToSpawn = atoi(argv[1]);
+    }
+    
     
     // set up signal handler for ctrl-c
     (void) signal(SIGINT, cleanup);
@@ -347,61 +339,25 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     } 
     
-    // Set up some shared memory to store our shared variables in
-    
-    // Close the shared memory we use just to be safe
-    shm_unlink("/sharedmem");
-    
-    int sharedmem;
-    
-    // Open the memory
-    if( (sharedmem = shm_open("/sharedmem", O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)) == -1)
-    {
-        fprintf(stderr, "Error opening sharedmem in main() errno is: %s ", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-    
-    // Set the size of the shared memory to the size of my structure
-    ftruncate(sharedmem, sizeof(sharedVariables) );
-    
-    // Map the shared memory into our address space
-    sharedVariables *mempointer;
-    
-    // Set mempointer to point at the shared memory
-    mempointer = mmap(NULL, sizeof(sharedVariables), PROT_READ | PROT_WRITE, MAP_SHARED, sharedmem, 0); 
-    
-    // Check the memory allocation went OK
-    if( mempointer == MAP_FAILED )
-    {
-        fprintf(stderr, "Error setting shared memory for sharedVariables in recordTotalBytes() error is %d \n ", errno);
-        exit(EXIT_FAILURE);
-    }
-    // Initalise the mutex
-    pthread_mutex_init(&(*mempointer).mutexlock, NULL);
-    // Set total bytes sent to 0
-    (*mempointer).totalbytes = 0;
-
     // Size of the address
-    int addr_size = sizeof(servaddr);
+    unsigned int addr_size = sizeof(servaddr);
     
     // Sizes of data were sending out
     int headersize;
     int pagesize;
-    int totaldata;
     // Number of child processes we have spawned
     int children = 0;
     // Variable to store the ID of the process we get when we spawn
     pid_t pid;
-    
+
+    printf("server starting on port %d\n", port);
     // Loop infinitly serving requests
     while(1)
     {
     
-        // If we haven't already spawned 10 children fork
-        if( children <= 10)
-        {
-            pid = fork();
-            children++;
+        if (children < childrenToSpawn) {
+          pid = fork();
+          children++;
         }
         
         // If the pid is -1 the fork failed so handle that
@@ -414,11 +370,14 @@ int main(int argc, char *argv[]) {
         // Have the child process deal with the connection
         if ( pid == 0)
         {	
+            printf("process starting\n");
             // Have the child loop infinetly dealing with a connection then getting the next one in the queue
             while(1)
             {
                 // Accept a connection
                 conn_s = accept(list_s, (struct sockaddr *)&servaddr, &addr_size);
+                struct timeval start;
+                gettimeofday(&start,NULL);
                     
                 // If something went wrong with accepting the connection deal with it
                 if(conn_s == -1)
@@ -437,16 +396,27 @@ int main(int argc, char *argv[]) {
                 free(header);
                 
                 // Print out the correct header
-                headersize = printHeader(conn_s, details.returncode);
+                char * contentType;
+                if (details.filename != NULL) {
+                  contentType = "text/html";
+                } else {
+                  contentType = "application/json";
+                }
+                headersize = printHeader(conn_s, details.returncode, contentType);
                 
-                // Print out the file they wanted
-                pagesize = printFile(conn_s, details.filename);
+                if (details.filename != NULL) {
+                  // Print out the file they wanted
+                  pagesize = printFile(conn_s, details.filename);
+                } else {
+                  pagesize = strlen(details.content);
+                  sendMessage(conn_s, details.content);
+                  sendMessage(conn_s, "\n");
+                }
                 
-                // Increment our count of total datasent by all processes and get back the new total
-                totaldata = recordTotalBytes(headersize+pagesize, mempointer);
-                
+                struct timeval endtime;
+                gettimeofday(&endtime,NULL);
                 // Print out which process handled the request and how much data was sent
-                printf("Process %d served a request of %d bytes. Total bytes sent %d  \n", getpid(), headersize+pagesize, totaldata);	
+                printf("served by process %d for %d bytes in %d usec\n", getpid(), headersize+pagesize, endtime.tv_usec - start.tv_usec);
                 
                 // Close the connection now were done
                 close(conn_s);
